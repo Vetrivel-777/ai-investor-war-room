@@ -1,0 +1,23 @@
+{
+  "name": "ai-investor-war-room",
+  "version": "1.0.0",
+  "description": "Venture Capital AI Interrogation Simulator & Pitch War Room",
+  "author": "AI Investor War Room Engineering Team",
+  "license": "MIT",
+  "scripts": {
+    "test": "pytest",
+    "test:verbose": "pytest -v",
+    "test:coverage": "pytest --cov=. tests/",
+    "lint": "python -m flake8 . --max-line-length=120 --exclude=.venv,__pycache__",
+    "typecheck": "python -m mypy evaluator.py ai_engine.py prompts.py --ignore-missing-imports",
+    "start": "python -m streamlit run app.py"
+  },
+  "keywords": [
+    "ai",
+    "venture-capital",
+    "pitch-training",
+    "streamlit",
+    "gemini",
+    "simulator"
+  ]
+}

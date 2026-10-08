@@ -57,14 +57,53 @@ def get_genai_client() -> Optional[genai.Client]:
         return None
 
 
+def _safe_log_error(prefix: str, err: Exception) -> None:
+    """Logs sanitized error message without risking credential or token leakage."""
+    err_cls = type(err).__name__
+    raw_msg = str(err)
+    # Redact common credential patterns if any appear in error output
+    sanitized_msg = re.sub(r'(key|token|api_key|auth|secret)=[\w\-\.]+', r'\1=[REDACTED]', raw_msg, flags=re.IGNORECASE)
+    print(f"{prefix} [{err_cls}]: {sanitized_msg[:200]}")
+
+
 def _clean_json_response(raw_text: str) -> Dict[str, Any]:
-    """Helper to extract and parse JSON from LLM response text."""
+    """Helper to extract and parse JSON from LLM response text safely."""
     text = raw_text.strip()
     if "```" in text:
         match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text)
         if match:
             text = match.group(1).strip()
-    return json.loads(text)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        # Fallback regex to find first outer {...} if model provided markdown preamble
+        match = re.search(r"(\{[\s\S]*\})", text)
+        if match:
+            return json.loads(match.group(1))
+        raise
+
+
+def format_pitch_memo(pitch_data: Dict[str, str]) -> str:
+    """Formats pitch dictionary into structured memo text for prompts."""
+    return f"""STARTUP PITCH MEMO:
+- Startup Name: {pitch_data.get('startup_name', 'Unnamed Startup')}
+- Elevator Pitch: {pitch_data.get('building', 'N/A')}
+- Problem Solved: {pitch_data.get('problem', 'N/A')}
+- Target Customer: {pitch_data.get('target_customer', 'N/A')}
+- Business Model: {pitch_data.get('business_model', 'N/A')}"""
+
+
+def format_transcript(interrogation_history: List[Dict[str, Any]]) -> str:
+    """Formats interrogation history into structured transcript for prompt context."""
+    formatted_history = ""
+    for idx, turn in enumerate(interrogation_history, 1):
+        shark = turn.get('shark_name') or INVESTOR_PERSONAS.get(turn.get('shark_id', ''), {}).get('name', 'Shark')
+        q = turn.get('question', '')
+        ans = turn.get('answer', '')
+        formatted_history += f"\nTurn {idx} [{shark}]:\n"
+        formatted_history += f"  Question: {q}\n"
+        formatted_history += f"  Founder Answer: {ans}\n"
+    return formatted_history
 
 
 def _is_transient_error(e: Exception) -> bool:
@@ -326,13 +365,8 @@ def generate_first_question(pitch_data: Dict[str, str]) -> Dict[str, Any]:
     """Generates the opening question from the investor panel based on pitch memo."""
     client = get_genai_client()
     if client:
-        prompt = f"""
-STARTUP PITCH MEMO:
-- Startup Name: {pitch_data.get('startup_name')}
-- Elevator Pitch: {pitch_data.get('building')}
-- Problem Solved: {pitch_data.get('problem')}
-- Target Customer: {pitch_data.get('target_customer')}
-- Business Model: {pitch_data.get('business_model')}
+        memo_text = format_pitch_memo(pitch_data)
+        prompt = f"""{memo_text}
 
 This is the start of the interrogation. Select the single best Shark to open the interrogation with a sharp, challenging question about their core pitch claims.
 """
@@ -352,7 +386,7 @@ This is the start of the interrogation. Select the single best Shark to open the
                 "is_fallback": False
             }
         except Exception as e:
-            print(f"Gemini API unavailable for first question ({e}). Switching to deterministic fallback.")
+            _safe_log_error("Gemini API unavailable for first question; switching to deterministic fallback", e)
 
     return get_fallback_first_question(pitch_data)
 
@@ -366,22 +400,13 @@ def generate_next_adaptive_question(
     """
     client = get_genai_client()
     if client:
-        formatted_history = ""
-        for idx, turn in enumerate(interrogation_history, 1):
-            formatted_history += f"\nTurn {idx} [{turn.get('shark_name')}]:\n"
-            formatted_history += f"  Question: {turn.get('question')}\n"
-            formatted_history += f"  Founder Answer: {turn.get('answer')}\n"
+        memo_text = format_pitch_memo(pitch_data)
+        transcript_text = format_transcript(interrogation_history)
 
-        prompt = f"""
-STARTUP PITCH MEMO:
-- Startup Name: {pitch_data.get('startup_name')}
-- Elevator Pitch: {pitch_data.get('building')}
-- Problem Solved: {pitch_data.get('problem')}
-- Target Customer: {pitch_data.get('target_customer')}
-- Business Model: {pitch_data.get('business_model')}
+        prompt = f"""{memo_text}
 
 INTERROGATION TRANSCRIPT SO FAR:
-{formatted_history}
+{transcript_text}
 
 Analyze the latest answer from the founder. Check if they dodged the question, made unsupported claims, or CONTRADICTED any statement from earlier turns or their pitch memo.
 Generate the next adaptive question from the most appropriate Shark.
@@ -402,7 +427,7 @@ Generate the next adaptive question from the most appropriate Shark.
                 "is_fallback": False
             }
         except Exception as e:
-            print(f"Gemini API unavailable for next question ({e}). Switching to deterministic fallback.")
+            _safe_log_error("Gemini API unavailable for next question; switching to deterministic fallback", e)
 
     return get_fallback_next_question(pitch_data, interrogation_history)
 
@@ -414,22 +439,13 @@ def generate_final_evaluation(
     """Generates comprehensive investment committee scorecard and verdict."""
     client = get_genai_client()
     if client:
-        formatted_history = ""
-        for idx, turn in enumerate(interrogation_history, 1):
-            formatted_history += f"\nTurn {idx} [{turn.get('shark_name')}]:\n"
-            formatted_history += f"  Question: {turn.get('question')}\n"
-            formatted_history += f"  Founder Answer: {turn.get('answer')}\n"
+        memo_text = format_pitch_memo(pitch_data)
+        transcript_text = format_transcript(interrogation_history)
 
-        prompt = f"""
-STARTUP PITCH MEMO:
-- Startup Name: {pitch_data.get('startup_name')}
-- Elevator Pitch: {pitch_data.get('building')}
-- Problem Solved: {pitch_data.get('problem')}
-- Target Customer: {pitch_data.get('target_customer')}
-- Business Model: {pitch_data.get('business_model')}
+        prompt = f"""{memo_text}
 
 COMPLETE INTERROGATION TRANSCRIPT:
-{formatted_history}
+{transcript_text}
 
 Generate the final Investment Committee Scorecard and verdicts.
 """
@@ -439,6 +455,6 @@ Generate the final Investment Committee Scorecard and verdicts.
             parsed["is_fallback"] = False
             return parsed
         except Exception as e:
-            print(f"Gemini API unavailable for evaluation ({e}). Switching to deterministic fallback.")
+            _safe_log_error("Gemini API unavailable for evaluation; switching to deterministic fallback", e)
 
     return get_fallback_evaluation(pitch_data, interrogation_history)
